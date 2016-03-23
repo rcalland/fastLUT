@@ -1,7 +1,16 @@
 #pragma once
 #include <iostream>
 #include <cstdint>
-#include <TH3I.h>
+#include "math.h"
+
+
+#include "hemi/hemi.h"
+#ifdef __CUDACC__
+#include "hemi/launch.h"
+#include "hemi/device_api.h"
+#endif
+
+//#include <TH3I.h>
 
 //https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
 
@@ -15,15 +24,26 @@ class fastLUT3D
   void setElement(uint32_t x, uint32_t y, uint32_t z, float value, bool morton = true);
   void setBounds(float xlo, float xhi, float ylo, float yhi, float zlo, float zhi);
   
-  float Interpolate(float x, float y, float z, bool morton = true);
+  HEMI_DEV_CALLABLE_MEMBER float Interpolate(float x, float y, float z, bool morton = true);
+
+  void GPUmode(bool on);
   
-  void makeMortonPlot(TH3I &h);
+  //void makeMortonPlot(TH3I &h);
   
  protected:
   int key_array_size;
   int one_dim_size;
-  float *key_array;
   float *xyz_array;
+
+  bool GPU_mode;
+#ifdef __CUDACC__
+  void createCudaArray();
+  void createTexture();
+  
+  cudaArray_t array;
+  cudaTextureObject_t tex;
+  float *gpu_params; // xlo, ylo, zlo, inv-cell size
+#endif
   
   float xbound[2];
   float ybound[2];

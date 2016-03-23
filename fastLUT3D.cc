@@ -4,48 +4,54 @@ fastLUT3D::fastLUT3D(int array_size)
 {
   key_array_size = pow(array_size, 3);
   one_dim_size = array_size;
+
+  GPU_mode = false; // off by default
   
   init();
 }
 
 fastLUT3D::~fastLUT3D()
 {
-  delete [] key_array;
   delete [] xyz_array;
+
+#ifdef __CUDACC__
+  cudaFree(gpu_params);
+  cudaFreeArray(array);
+  cudaDestroyTextureObject(tex);
+#endif
 }
 
 void fastLUT3D::init()
 {
-  key_array = new float[key_array_size];
   xyz_array = new float[key_array_size];
 }
 
 void fastLUT3D::setElement(uint32_t x, uint32_t y, uint32_t z, float value, bool morton)
 {
+  uint32_t key;
   if (morton)
     {
-      uint32_t key = EncodeMorton(x, y, z);
-      key_array[key] = value;
+      key = EncodeMorton(x, y, z);
     }
   else
     {
-      uint32_t key = index(x, y, z);
-      xyz_array[key] = value;
+      key = index(x, y, z);
     }
+  xyz_array[key] = value;
 }
 
 inline float fastLUT3D::getElement(uint32_t x, uint32_t y, uint32_t z, bool morton)
 {
+  uint64_t key;
   if (morton)
     {
-      uint64_t key = EncodeMorton(x, y, z);
-      return key_array[key];
+      key = EncodeMorton(x, y, z);
     }
   else
     {
-      uint32_t key = index(x, y, z);
-      return xyz_array[key];
+      key = index(x, y, z);
     }
+  return xyz_array[key];
 }
 
 void fastLUT3D::setBounds(float xlo, float xhi, float ylo, float yhi, float zlo, float zhi)
@@ -65,6 +71,12 @@ void fastLUT3D::setBounds(float xlo, float xhi, float ylo, float yhi, float zlo,
   inv_cell_size[0] = 1.0f / cell_size[0];
   inv_cell_size[1] = 1.0f / cell_size[1];
   inv_cell_size[2] = 1.0f / cell_size[2];
+
+#ifdef __CUDACC__
+  float cpu_params[4] = {xbound[0], ybound[0], zbound[0], inv_cell_size[0]};
+  cudaMalloc((void**)&gpu_params, 4 * sizeof(float));
+  cudaMemcpy(gpu_params, cpu_params, 4 * sizeof(float), cudaMemcpyHostToDevice);
+#endif
 }
 
 inline uint32_t fastLUT3D::index(uint32_t x, uint32_t y, uint32_t z)
@@ -85,7 +97,7 @@ inline uint64_t fastLUT3D::EncodeMorton(uint32_t x, uint32_t y, uint32_t z)
     morton256_z[(z) & 0xFF ] | // first byte
     morton256_y[(y) & 0xFF ] |
     morton256_x[(x) & 0xFF ];
-  return answer;
+  //return answer;
   
   return answer;//(Part1By2(z) << 2) + (Part1By2(y) << 1) + Part1By2(x);
 }
@@ -117,12 +129,21 @@ inline uint32_t fastLUT3D::Compact1By2(uint32_t x)
   return x;
 }
 
-float fastLUT3D::Interpolate(float x, float y, float z, bool morton)
+HEMI_DEV_CALLABLE_MEMBER float fastLUT3D::Interpolate(float x, float y, float z, bool morton)
 {
+  #ifdef HEMI_DEV_CODE
+  float invcellsize = gpu_params[4];
+  float xd = (x - gpu_params[0]) * invcellsize + 0.5f;
+  float yd = (y - gpu_params[1]) * invcellsize + 0.5f;
+  float zd = (z - gpu_params[2]) * invcellsize + 0.5f;
+  
+  return tex3D<float>(tex, xd, yd, zd);
+  #else
+
   float xd = (x - xbound[0]) * inv_cell_size[0];
   float yd = (y - ybound[0]) * inv_cell_size[1];
   float zd = (z - zbound[0]) * inv_cell_size[2];
-    
+  
   uint32_t ubx = (uint32_t)xd;
   uint32_t uby = (uint32_t)yd;
   uint32_t ubz = (uint32_t)zd;
@@ -154,12 +175,79 @@ float fastLUT3D::Interpolate(float x, float y, float z, bool morton)
 
   //std::cout << w1 << " " << w2 << " " << v[0] << std::endl;
   return result;
+  #endif
 }
 
-void fastLUT3D::makeMortonPlot(TH3I &h)
+/*void fastLUT3D::makeMortonPlot(TH3I &h)
 {
   for (int i = 0; i < h.GetNbinsX(); ++i)
     for (int j = 0; j < h.GetNbinsY(); ++j)
       for (int k = 0; k < h.GetNbinsZ(); ++k)
 	h.SetBinContent(i+1, j+1, k+1, getElement(i,j,k));//EncodeMorton(i,j,k));
+	}*/
+
+void fastLUT3D::GPUmode(bool on)
+{
+  if (on)
+    {
+      #ifdef __CUDACC__
+      GPU_mode = true;
+      createCudaArray();
+      createTexture();
+      #else
+      printf("ERROR: GPU mode selected, but not compiled with GPU support.\n");
+      exit(-1);
+      #endif
+    }
+  else
+    {
+      GPU_mode = false;
+    }
 }
+  
+// gpu only functions
+#ifdef __CUDACC__
+
+void fastLUT3D::createCudaArray()
+{
+  cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float>();
+  cudaMemcpy3DParms copyParams = {0};
+  
+  cudaExtent volumeSize = make_cudaExtent(one_dim_size, one_dim_size, one_dim_size);
+  cudaMalloc3DArray(&array, &channelDesc, volumeSize);
+  copyParams.srcPtr = make_cudaPitchedPtr((void*)xyz_array, volumeSize.width * sizeof(float), volumeSize.width, volumeSize.height);
+  copyParams.dstArray = array;
+  copyParams.extent   = volumeSize;
+  copyParams.kind     = cudaMemcpyHostToDevice;
+  cudaMemcpy3D(&copyParams);
+}
+
+void fastLUT3D::createTexture()
+{
+  // created array, now to bind it to a texture object
+  struct cudaResourceDesc resDesc;
+  memset(&resDesc, 0, sizeof(resDesc));
+  resDesc.resType =  cudaResourceTypeArray;
+
+  resDesc.res.linear.devPtr = array;
+  resDesc.res.linear.sizeInBytes = one_dim_size * one_dim_size * one_dim_size * sizeof(float);
+
+  resDesc.res.linear.desc.f = cudaChannelFormatKindFloat;
+  resDesc.res.linear.desc.x = 32;
+  struct cudaTextureDesc texDesc;
+  memset(&texDesc, 0, sizeof(texDesc));
+  texDesc.normalizedCoords = false;
+  //texDesc.normalizedCoords = true;
+  texDesc.readMode = cudaReadModeElementType;
+  //texDesc.filterMode = cudaFilterModePoint;
+  texDesc.filterMode = cudaFilterModeLinear;
+
+  texDesc.addressMode[0] = cudaAddressModeClamp;
+  texDesc.addressMode[1] = cudaAddressModeClamp;
+  texDesc.addressMode[2] = cudaAddressModeClamp;
+
+  // make the texture object
+  cudaCreateTextureObject(&tex, &resDesc, &texDesc, NULL);
+}
+
+#endif

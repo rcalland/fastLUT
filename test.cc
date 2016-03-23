@@ -5,6 +5,7 @@
 #include "TRandom3.h"
 #include "TStopwatch.h"
 #include "TH1F.h"
+#include "TH3I.h"
 #include "TF1.h"
 
 int main()
@@ -41,12 +42,12 @@ int main()
 	  c++;
 	}
   
-  TH3I *hist = new TH3I("morton","",s,0,s,s,0,s,s,0,s);
+  /*TH3I *hist = new TH3I("morton","",s,0,s,s,0,s,s,0,s);
   
   lut->makeMortonPlot(*hist);
   TCanvas *c1 = new TCanvas();
   hist->Draw();
-  c1->SaveAs("morton.C");
+  c1->SaveAs("morton.C");*/
 
   // lambda magic!
   auto genRnd = [=]() { return (float) (5.0f + rnd->Rndm() * 90); };
